@@ -44,3 +44,51 @@ class Catalog:
         if row is None:
             raise KeyError(asset_id)
         return dict(row)
+
+    def propose_mapping(self, mapping_id, canonical, source_id, field_name, at, actor):
+        if not canonical:
+            raise ValueError("语义映射缺少目标字段名")
+        field = self.connection.execute(
+            "SELECT f.meaning,s.schema_version FROM fields f JOIN sources s ON s.id=f.source_id "
+            "WHERE f.source_id=? AND f.name=?",
+            (source_id, field_name),
+        ).fetchone()
+        if field is None:
+            raise KeyError((source_id, field_name))
+        revision = self.connection.execute("SELECT COALESCE(MAX(revision),0)+1 FROM field_mappings WHERE id=?", (mapping_id,)).fetchone()[0]
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO field_mappings(id,revision,canonical,source_id,field_name,meaning,schema_version,status,created_at) "
+                "VALUES(?,?,?,?,?,?,?,'pending',?)",
+                (mapping_id, revision, canonical, source_id, field_name, field["meaning"], field["schema_version"], at),
+            )
+            write(self.connection, at, actor, "mapping.propose", mapping_id, {"revision": revision, "canonical": canonical, "source": source_id, "field": field_name})
+        return revision
+
+    def decide_mapping(self, mapping_id, revision, approve, at, actor):
+        row = self.connection.execute("SELECT status FROM field_mappings WHERE id=? AND revision=?", (mapping_id, revision)).fetchone()
+        if row is None:
+            raise KeyError(mapping_id)
+        if row["status"] != "pending":
+            raise ValueError("语义映射已审结")
+        status = "approved" if approve else "rejected"
+        with self.connection:
+            self.connection.execute("UPDATE field_mappings SET status=?,decided_at=? WHERE id=? AND revision=?", (status, at, mapping_id, revision))
+            write(self.connection, at, actor, "mapping.decide", mapping_id, {"revision": revision, "status": status})
+        return status
+
+    def mapping(self, mapping_id, revision=None):
+        if revision is None:
+            row = self.connection.execute("SELECT * FROM field_mappings WHERE id=? ORDER BY revision DESC LIMIT 1", (mapping_id,)).fetchone()
+        else:
+            row = self.connection.execute("SELECT * FROM field_mappings WHERE id=? AND revision=?", (mapping_id, revision)).fetchone()
+        if row is None:
+            raise KeyError(mapping_id)
+        return dict(row)
+
+    def mappings(self, status=None):
+        if status is None:
+            rows = self.connection.execute("SELECT * FROM field_mappings ORDER BY id,revision").fetchall()
+        else:
+            rows = self.connection.execute("SELECT * FROM field_mappings WHERE status=? ORDER BY id,revision", (status,)).fetchall()
+        return [dict(row) for row in rows]
